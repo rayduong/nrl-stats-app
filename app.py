@@ -86,24 +86,25 @@ if prompt := st.chat_input("E.g., Who scored the most tries in Round 1?"):
                 messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
             )
             
-            # 4. STREAM & EXTRACT RESPONSE
+            # 4. STREAM & EXTRACT RESPONSE (The "Clean" Version)
             stream = client.chat(request=request)
             full_response = ""
             
             for reply in stream:
                 if hasattr(reply, 'system_message'):
                     sm = reply.system_message
-                    if hasattr(sm, 'text') and sm.text.parts:
-                        # Only collect text that isn't background 'thinking'
-                        chunk = " ".join(sm.text.parts)
-                        if "Retrieved context" not in chunk and "crafted a SQL" not in chunk:
-                            full_response += chunk + "\n\n"
-
+                    
+                    # This is the "Filter" - it checks the type of message
+                    # Type 3 = FINAL_RESPONSE
+                    if hasattr(sm, 'text') and sm.text.text_type == 3:
+                        for part in sm.text.parts:
+                            full_response += part + "\n"
+            
+            # If the filter finds a formal response, show it
             if full_response.strip():
                 st.markdown(full_response)
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
             else:
-                st.warning("Agent found data but didn't generate a text summary. Try asking specifically for a list or summary.")
-                
-        except Exception as e:
-            st.error(f"Error: {e}")
+                # Fallback: if no formal response exists, show the first non-thought chunk
+                # This ensures the user isn't left with a blank screen if the AI skips a step
+                st.warning("The agent processed the data but didn't format a final summary.")
