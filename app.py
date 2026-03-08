@@ -1,6 +1,6 @@
 import streamlit as st
 from google.cloud import geminidataanalytics
-from google.protobuf.json_format import MessageToDict
+from google.cloud import bigquery
 import json
 import os
 import pandas as pd
@@ -20,6 +20,13 @@ if "GOOGLE_CREDENTIALS" in st.secrets:
         st.error(f"❌ Authentication Error: {e}")
         st.stop()
 
+# --- CONSTANTS ---
+MY_PROJECT = "nrl-2026-489302"
+MY_LOCATION = "global"
+MY_DATASET = "player_stats"
+MY_TABLE = "player_stats_test_2"
+FULL_TABLE_ID = f"{MY_PROJECT}.{MY_DATASET}.{MY_TABLE}"
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("🏆 NRL AI Settings")
@@ -37,177 +44,135 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+def run_nrl_summary_agent(prompt: str) -> str:
+    """Use Gemini Data Analytics ONLY for narrative summary."""
+    client = geminidataanalytics.DataChatServiceClient()
+
+    bq_ref = geminidataanalytics.BigQueryTableReference(
+        project_id=MY_PROJECT, dataset_id=MY_DATASET, table_id=MY_TABLE
+    )
+
+    context = geminidataanalytics.Context(
+        system_instruction=(
+            "You are an expert NRL analyst using a stats table. "
+            "Answer in natural language only. "
+            "Do NOT describe your SQL, process, or thinking. "
+            "Write a short 'Summary' section and an 'Insights' section. "
+            "Finish with 2–3 suggested follow up questions on separate lines."
+        ),
+        datasource_references=geminidataanalytics.DatasourceReferences(
+            bq=geminidataanalytics.BigQueryTableReferences(
+                table_references=[bq_ref]
+            )
+        ),
+    )
+
+    request = geminidataanalytics.ChatRequest(
+        parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
+        inline_context=context,
+        messages=[
+            geminidataanalytics.Message(
+                user_message=geminidataanalytics.UserMessage(text=prompt)
+            )
+        ],
+    )
+
+    stream = client.chat(request=request)
+
+    parts = []
+    for reply in stream:
+        if hasattr(reply, "system_message") and getattr(reply.system_message, "text", None):
+            parts.extend([p for p in reply.system_message.text.parts if p])
+
+    text = "\n".join(parts).strip()
+    if not text:
+        return "I could not generate a summary from the data."
+
+    # Split suggested follow-ups into own section
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    main_lines, q_lines = [], []
+    for ln in lines:
+        if ln.endswith("?"):
+            q_lines.append(ln)
+        else:
+            main_lines.append(ln)
+
+    main_text = "\n\n".join(main_lines)
+    followup_text = "\n".join(f"- {q}" for q in q_lines)
+
+    if q_lines:
+        return f"{main_text}\n\n\n### Suggested follow up questions\n\n{followup_text}"
+    return main_text
+
+def query_runs_vs_tries(round_number: int = 1) -> pd.DataFrame:
+    """Direct BigQuery query for runs vs tries for a round."""
+    bq_client = bigquery.Client(project=MY_PROJECT)
+
+    query = f"""
+    SELECT
+      player_name,
+      runs,
+      tries
+    FROM `{FULL_TABLE_ID}`
+    WHERE round = @round
+    ORDER BY runs DESC
+    LIMIT 50
+    """
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("round", "INT64", round_number)]
+    )
+
+    df = bq_client.query(query, job_config=job_config).to_dataframe()
+    return df
+
 # --- CHAT INPUT ---
-if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
+if prompt := st.chat_input("Ask about NRL Round 1 stats, e.g. 'Show me a chart of runs vs tries for Round 1'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Executing BigQuery Stats..."):
+        with st.spinner("Analyzing NRL stats..."):
             try:
-                client = geminidataanalytics.DataChatServiceClient()
+                # 1) Get narrative answer from Gemini
+                summary_text = run_nrl_summary_agent(prompt)
 
-                # --- PROJECT CONFIG ---
-                MY_PROJECT = "nrl-2026-489302"
-                MY_LOCATION = "global"
-                MY_DATASET = "player_stats"
-                MY_TABLE = "player_stats_test_2"
+                # 2) Always try to build a visual for Round 1 runs vs tries
+                #    (you can later parse the prompt to choose round/metric)
+                try:
+                    df = query_runs_vs_tries(round_number=1)
+                except Exception as e:
+                    st.error(f"Failed to query BigQuery: {e}")
+                    df = None
 
-                bq_ref = geminidataanalytics.BigQueryTableReference(
-                    project_id=MY_PROJECT,
-                    dataset_id=MY_DATASET,
-                    table_id=MY_TABLE
-                )
+                if df is not None and not df.empty:
+                    st.subheader("Runs vs tries – Round 1 (Top 50 players)")
+                    # Ensure numeric
+                    for col in ["runs", "tries"]:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-                my_context = geminidataanalytics.Context(
-                    system_instruction=(
-                        "You are an expert NRL analyst. "
-                        "Return three sections in this order: "
-                        "'Summary', then 'Insights', then one or more suggested follow-up "
-                        "questions on separate lines. "
-                        "Do NOT describe your process, SQL, or tools."
-                    ),
-                    datasource_references=geminidataanalytics.DatasourceReferences(
-                        bq=geminidataanalytics.BigQueryTableReferences(
-                            table_references=[bq_ref]
-                        )
-                    ),
-                )
+                    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+                    if {"runs", "tries"}.issubset(num_cols):
+                        st.scatter_chart(df, x="runs", y="tries", color=None)
+                    elif len(num_cols) >= 2:
+                        st.scatter_chart(df, x=num_cols[0], y=num_cols[1], color=None)
+                    elif num_cols:
+                        metric = num_cols[0]
+                        chart_df = df.set_index("player_name")[metric] if "player_name" in df.columns else df[metric]
+                        st.bar_chart(chart_df)
 
-                request = geminidataanalytics.ChatRequest(
-                    parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
-                    inline_context=my_context,
-                    messages=[
-                        geminidataanalytics.Message(
-                            user_message=geminidataanalytics.UserMessage(text=prompt)
-                        )
-                    ],
-                )
-
-                stream = client.chat(request=request)
-
-                # Collect raw text parts and any tabular data
-                text_buffer = []
-                dataframes = []
-
-                for reply in stream:
-                    if not hasattr(reply, "system_message"):
-                        continue
-                    sm = reply.system_message
-
-                    # TEXT
-                    if getattr(sm, "text", None) is not None:
-                        for part in sm.text.parts:
-                            if part:
-                                text_buffer.append(part)
-
-                    # DATA
-                    if (
-                        getattr(sm, "data", None) is not None
-                        and getattr(sm.data, "result", None) is not None
-                        and sm.data.result.data
-                    ):
-                        try:
-                            rows = []
-                            for row in sm.data.result.data:
-                                row_dict = MessageToDict(row._pb)
-                                if "fields" in row_dict:
-                                    flat_row = {}
-                                    for col_name, val_dict in row_dict["fields"].items():
-                                        value = list(val_dict.values())[0]
-                                        flat_row[col_name] = value
-                                    rows.append(flat_row)
-                            if rows:
-                                df = pd.DataFrame(rows)
-                                # Coerce numerics where possible
-                                for col in df.columns:
-                                    df[col] = pd.to_numeric(df[col], errors="ignore")
-                                dataframes.append(df)
-                        except Exception:
-                            pass
-
-                raw_text = "\n".join(text_buffer).strip()
-
-                # ========= TEXT POST-PROCESSING =========
-                # We assume the model has already stopped exposing its thinking.
-                # We now split into main body + suggested follow-ups.
-                lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-
-                main_lines = []
-                followup_lines = []
-                for ln in lines:
-                    # Treat any question at the *end* as a suggested follow-up
-                    if ln.endswith("?"):
-                        followup_lines.append(ln)
-                    else:
-                        main_lines.append(ln)
-
-                main_text = "\n\n".join(main_lines).strip()
-                followup_text = "\n".join(f"- {q}" for q in followup_lines)
-
-                # Combine for history: show main text plus a dedicated follow-up section
-                if followup_lines:
-                    display_text = (
-                        f"{main_text}\n\n\n"
-                        "### Suggested follow up questions\n\n"
-                        f"{followup_text}"
-                    )
-                else:
-                    display_text = main_text
-
-                # ========= VISUALISATIONS =========
-                if dataframes:
-                    for df in dataframes:
-                        st.subheader("Data Analysis Results")
-
-                        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-
-                        if not numeric_cols:
-                            st.info("No numeric columns detected in returned data. Showing table only.")
-                            st.dataframe(df, use_container_width=True)
-                            continue
-
-                        # Prefer 'runs' and 'tries' if present, otherwise first two numerics
-                        runs_col_candidates = [c for c in numeric_cols if "run" in c.lower()]
-                        tries_col_candidates = [c for c in numeric_cols if "try" in c.lower()]
-
-                        if runs_col_candidates and tries_col_candidates:
-                            x_col = runs_col_candidates[0]
-                            y_col = tries_col_candidates[0]
-                        elif len(numeric_cols) >= 2:
-                            x_col, y_col = numeric_cols[0], numeric_cols[1]
-                        else:
-                            x_col, y_col = None, numeric_cols[0]
-
-                        if x_col and y_col:
-                            st.caption(f"Scatter: {x_col} vs {y_col}")
-                            st.scatter_chart(df, x=x_col, y=y_col)
-                        else:
-                            metric_col = y_col
-                            index_candidates = [c for c in df.columns if c != metric_col]
-                            if index_candidates:
-                                idx_col = index_candidates[0]
-                                chart_df = df.set_index(idx_col)[[metric_col]]
-                            else:
-                                chart_df = df[[metric_col]]
-                            st.caption(f"Bar chart of {metric_col}")
-                            st.bar_chart(chart_df)
-
-                        st.dataframe(df, use_container_width=True)
+                    st.dataframe(df, use_container_width=True)
                 else:
                     st.info(
-                        "The agent returned narrative insights but no structured table for charting. "
-                        "Try a more data-focused prompt such as "
-                        "'Return a table of runs and tries by player for Round 1.'"
+                        "No rows were returned for runs vs tries in Round 1. "
+                        "Check the table name, dataset, or round filter."
                     )
 
-                # ========= RENDER TEXT ANSWER =========
-                if display_text:
-                    st.markdown(display_text)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": display_text}
-                    )
+                # 3) Render text answer
+                st.markdown(summary_text)
+                st.session_state.messages.append({"role": "assistant", "content": summary_text})
 
             except Exception as e:
                 st.error(f"❌ System Error: {e}")
