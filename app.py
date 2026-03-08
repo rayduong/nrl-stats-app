@@ -55,29 +55,44 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
         try:
             client = geminidataanalytics.DataChatServiceClient()
             
-            # --- THE FIX IS HERE ---
             MY_PROJECT = "nrl-2026-489302" 
             MY_AGENT = "agent_84bf3396-2e84-456b-b1bd-1d386c7f80a9"
             MY_LOCATION = "global"
             
             agent_path = client.data_agent_path(MY_PROJECT, MY_LOCATION, MY_AGENT)
             
+            # 1. Create a new conversation session
             conversation = client.create_conversation(
                 parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
                 conversation=geminidataanalytics.Conversation(agents=[agent_path])
             )
-            # -----------------------
             
-            response = client.send_message(
-                request=geminidataanalytics.SendMessageRequest(
-                    name=conversation.name,
-                    message=geminidataanalytics.Message(
-                        text_message=geminidataanalytics.TextMessage(text=prompt)
+            # 2. Package the question using the new ChatRequest format
+            request = geminidataanalytics.ChatRequest(
+                parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
+                messages=[
+                    geminidataanalytics.Message(
+                        user_message=geminidataanalytics.UserMessage(text=prompt)
                     )
+                ],
+                conversation_reference=geminidataanalytics.ConversationReference(
+                    conversation=conversation.name
                 )
             )
-            answer = response.message.text_message.text
+            
+            # 3. Call the new 'chat' method (This returns a stream)
+            stream = client.chat(request=request)
+            
+            # 4. Loop through the stream and collect the text
+            answer = ""
+            for reply in stream:
+                # Safely check if this specific chunk contains text
+                if hasattr(reply.message, "text_message") and reply.message.text_message.text:
+                    answer += reply.message.text_message.text + "\n\n"
+            
+            # Display the final combined answer
             st.markdown(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
+            
         except Exception as e:
             st.error(f"Error: {e}")
