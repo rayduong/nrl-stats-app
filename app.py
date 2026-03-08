@@ -35,13 +35,12 @@ st.title("🏆 NRL Stats AI Agent")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 # --- CHAT INPUT ---
-if prompt := st.chat_input("Ask about Round 1 stats..."):
+if prompt := st.chat_input("E.g., Compare top try scorers with a bar chart"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -61,7 +60,7 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                 )
                 
                 my_context = geminidataanalytics.Context(
-                    system_instruction="You are a professional NRL analyst. Provide summaries and insights. Do not include your internal thinking steps.",
+                    system_instruction="You are a professional NRL analyst. Provide summaries and insights. Do not show internal thinking steps.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
@@ -73,60 +72,67 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                     messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
                 )
                 
-                # 4. STREAM & EXTRACTION
+                # 4. STREAM & DYNAMIC EXTRACTION
                 stream = client.chat(request=request)
                 final_text = ""
-                table_df = None
+                data_list = []
                 
-                # List of keywords that identify 'Thoughts' we want to hide
-                JUNK_KEYWORDS = ["Retrieved context", "Examining Player", "formulating a query", "Summarizing Latrell", "received the SQL"]
-
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        # A. TEXT EXTRACTION (Exclusion Method)
+                        # A. CLEAN TEXT EXTRACTION
                         if hasattr(sm, 'text'):
                             for part in sm.text.parts:
-                                # 1. Strip out follow-up questions
-                                if part.strip().endswith("?"):
-                                    continue
-                                
-                                # 2. Strip out internal thoughts using our keyword list
-                                if any(junk in part for junk in JUNK_KEYWORDS):
-                                    continue
-                                
-                                # 3. If it passed those checks, it's our answer!
-                                final_text += part + "\n"
+                                # Block "Thinking" and "Refining" segments
+                                if any(x in part for x in ["Summary", "Insights", "Round 1"]):
+                                    if not any(y in part for y in ["Refining", "Considering", "Analyzing"]):
+                                        if not part.strip().endswith("?"):
+                                            final_text += part + "\n"
 
-                        # B. DATA TABLE EXTRACTION
+                        # B. DYNAMIC DATA COLLECTION
                         if hasattr(sm, 'data') and sm.data.result.data:
                             try:
-                                rows = []
                                 for row in sm.data.result.data:
                                     row_dict = MessageToDict(row._pb)
                                     if 'fields' in row_dict:
-                                        flat_row = {}
-                                        for k, v in row_dict['fields'].items():
-                                            # Safely get whatever value is inside (string, number, etc)
-                                            val = list(v.values())[0]
-                                            flat_row[k] = val
-                                        rows.append(flat_row)
-                                if rows:
-                                    table_df = pd.DataFrame(rows)
-                            except Exception:
-                                pass # Silently ignore data errors to keep text flowing
+                                        flat_row = {k: list(v.values())[0] for k, v in row_dict['fields'].items()}
+                                        data_list.append(flat_row)
+                            except:
+                                pass
 
-                # 5. DISPLAY RESULTS
-                if table_df is not None and not table_df.empty:
-                    st.subheader("Data Table")
-                    st.dataframe(table_df, use_container_width=True)
+                # 5. INTELLIGENT VISUALIZATION
+                if data_list:
+                    df = pd.DataFrame(data_list)
+                    cols = df.columns.tolist()
+                    
+                    st.subheader("Data Visualization")
+                    
+                    # Logic to decide the chart type
+                    if len(cols) >= 2:
+                        # 1. SCATTER: If two or more numeric columns exist (e.g., runs vs metres)
+                        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                        if len(numeric_cols) >= 2:
+                            st.scatter_chart(df, x=numeric_cols[0], y=numeric_cols[1], color=cols[0])
+                        
+                        # 2. LINE: If a time-based or sequence column exists (e.g., Round)
+                        elif any(x in str(cols).lower() for x in ['round', 'date', 'time']):
+                            st.line_chart(df.set_index(cols[0]))
+                            
+                        # 3. BAR: Default for categorical stats (e.g., Player vs Tries)
+                        else:
+                            st.bar_chart(df.set_index(cols[0]))
+                    
+                    # Always show the raw table in an expander for transparency
+                    with st.expander("View Raw Data Table"):
+                        st.dataframe(df, use_container_width=True)
 
+                # 6. DISPLAY FINAL TEXT
                 if final_text.strip():
                     st.markdown(final_text)
                     st.session_state.messages.append({"role": "assistant", "content": final_text})
-                elif table_df is None:
-                    st.warning("The agent didn't return a text summary. Please try asking: 'Show me Latrell Mitchell's stats for Round 1 in a table.'")
+                elif not data_list:
+                    st.warning("Query processed, but no summary or data was generated.")
                     
             except Exception as e:
-                st.error(f"Main Error: {e}")
+                st.error(f"Error: {e}")
