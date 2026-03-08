@@ -50,7 +50,7 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Call the BigQuery Agent directly (Bypassing the UI Agent)
+    # Call the BigQuery Agent directly
     with st.chat_message("assistant"):
         try:
             client = geminidataanalytics.DataChatServiceClient()
@@ -58,9 +58,8 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             MY_PROJECT = "nrl-2026-489302" 
             MY_LOCATION = "global"
             
-            # 1. Provide the exact Data Map
-            MY_DATASET = "player_stats" # <-- Replace with your dataset (e.g., nrl_stats)
-            MY_TABLE = "player_stats_test_2"     # <-- Replace with your table (e.g., player_data)
+            MY_DATASET = "player_stats" # <-- Ensure this is still correct
+            MY_TABLE = "player_stats_test_2"     # <-- Ensure this is still correct
             
             bq_ref = geminidataanalytics.BigQueryTableReference(
                 project_id=MY_PROJECT,
@@ -68,7 +67,6 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 table_id=MY_TABLE
             )
             
-            # 2. Build the Agent's brain entirely in code
             my_context = geminidataanalytics.Context(
                 system_instruction="You are an expert NRL stats analyst. Query the provided BigQuery table to answer user questions about player statistics.",
                 datasource_references=geminidataanalytics.DatasourceReferences(
@@ -78,7 +76,6 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 )
             )
             
-            # 3. Request the chat directly using inline context
             request = geminidataanalytics.ChatRequest(
                 parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
                 inline_context=my_context,
@@ -89,14 +86,29 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 ]
             )
             
-            # 4. Stream the response
+            # 4. Stream the response safely
             stream = client.chat(request=request)
             
             answer = ""
             for reply in stream:
-                if hasattr(reply.message, "text_message") and reply.message.text_message.text:
-                    answer += reply.message.text_message.text
+                try:
+                    # The stream yields 'Message' objects directly, so we drop '.message'
+                    tm = reply.text_message
+                    
+                    if tm:
+                        # Safely check available fields using the Protobuf DESCRIPTOR
+                        available_fields = [f.name for f in tm.DESCRIPTOR.fields]
+                        
+                        if "text" in available_fields and tm.text:
+                            answer += tm.text
+                        elif "parts" in available_fields and tm.parts:
+                            # Append the final part (often the full generated text)
+                            answer += str(tm.parts[-1]) + "\n\n"
+                except Exception:
+                    # Ignore unexpected stream chunks and keep moving
+                    pass
             
+            # Display the final answer
             st.markdown(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
             
