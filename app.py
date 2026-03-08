@@ -70,7 +70,7 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                 messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
             )
             
-            # 4. STREAM & EXTRACT (The Robust Version)
+            # 4. STREAM & EXTRACT (The "Bucket" Strategy)
             stream = client.chat(request=request)
             answer = ""
             
@@ -78,26 +78,24 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                 if hasattr(reply, 'system_message'):
                     sm = reply.system_message
                     
-                    # A. CAPTURE THE FINAL TEXT (Look for the label 'FINAL_RESPONSE')
-                    if hasattr(sm, 'text'):
-                        # This checks if the type is FINAL_RESPONSE regardless of version
-                        if "FINAL_RESPONSE" in str(sm.text.text_type):
+                    if hasattr(sm, 'text') and sm.text.parts:
+                        # Convert text_type to a string to check it safely
+                        t_type = str(sm.text.text_type).upper()
+                        
+                        # LOGIC: If it's NOT a 'THOUGHT', we want it.
+                        # This catches FINAL_RESPONSE, empty types, or new labels.
+                        if "THOUGHT" not in t_type:
                             for part in sm.text.parts:
-                                answer += part + "\n"
-                    
-                    # B. OPTIONAL: SHOW THE SQL (Great for transparency!)
-                    # if hasattr(sm, 'data') and sm.data.generated_sql:
-                    #    with st.expander("Show SQL Query"):
-                    #        st.code(sm.data.generated_sql, language="sql")
+                                # Avoid repeating the user's question if it's echoed back
+                                if part.strip() != prompt.strip():
+                                    answer += part + "\n"
 
-            # 5. DISPLAY
+            # 5. DISPLAY THE RESULT
             if answer.strip():
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                # Clean up any weird double-newlines and show the result
+                clean_answer = answer.replace("\n\n\n", "\n\n").strip()
+                st.markdown(clean_answer)
+                st.session_state.messages.append({"role": "assistant", "content": clean_answer})
             else:
-                # C. EMERGENCY FALLBACK: If FINAL_RESPONSE fails, take any text that isn't a "THOUGHT"
-                st.info("Gathering response...")
-                # (You can leave this blank or add a secondary loop if needed)
-
-        except Exception as e:
-            st.error(f"Error: {e}")
+                # If we still get nothing, we print the raw types to help you debug
+                st.error("The agent didn't return a final answer. Please try a simpler question like 'Who is Latrell Mitchell?'")
