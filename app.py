@@ -60,7 +60,7 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             MY_LOCATION = "global"
             
             # --- NEW: Give the API the exact map to your table ---
-            MY_DATASET = "round_data" # <-- Change this (e.g., "nrl_stats")
+            MY_DATASET = "player_stats" # <-- Change this (e.g., "nrl_stats")
             MY_TABLE = "player_stats_test_2"     # <-- Change this (e.g., "player_data_2026")
             
             bq_ref = geminidataanalytics.BigQueryTableReference(
