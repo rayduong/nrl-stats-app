@@ -22,10 +22,10 @@ if "GOOGLE_CREDENTIALS" in st.secrets:
         st.stop()
 
 # --- CONSTANTS ---
-MY_PROJECT  = "nrl-2026-489302"
-MY_LOCATION = "global"
-MY_DATASET  = "player_stats"
-MY_TABLE    = "player_stats_test_2"
+MY_PROJECT    = "nrl-2026-489302"
+MY_LOCATION   = "global"
+MY_DATASET    = "player_stats"
+MY_TABLE      = "player_stats_test_2"
 FULL_TABLE_ID = f"{MY_PROJECT}.{MY_DATASET}.{MY_TABLE}"
 
 # --- SIDEBAR ---
@@ -45,6 +45,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
@@ -52,6 +53,7 @@ for message in st.session_state.messages:
 @st.cache_data(show_spinner=False)
 def get_schema_string() -> tuple[str, list[str], list[str]]:
     """
+    Fetches the real column names and types from BigQuery.
     Returns:
       schema_str   – human-readable column list to inject into prompts
       numeric_cols – column names with numeric BQ types
@@ -89,8 +91,7 @@ def ask_agent(prompt: str, schema_str: str) -> dict:
             "1. Answer concisely in a 'Summary' section and an 'Insights' section.\n"
             "2. After the insights, output a single line starting with 'SQL:' containing "
             "   a valid BigQuery SELECT statement that retrieves the data relevant to the "
-            "   user's question (e.g. top players by runs, tries, metres etc). "
-            "   Only use column names from the schema above. Limit to 50 rows.\n"
+            "   user's question. Only use column names from the schema above. Limit to 50 rows.\n"
             "3. After the SQL line, output 2-3 follow-up questions each on its own line.\n"
             "4. Do NOT describe your internal thinking, process, or query generation."
         ),
@@ -117,6 +118,13 @@ def ask_agent(prompt: str, schema_str: str) -> dict:
 
     raw = "\n".join(parts).strip()
 
+    # ── ANCHOR TO "Summary" — discard everything before it ──
+    # Thinking/reasoning always appears before the Summary heading.
+    # If no Summary heading exists, fall back to the full text.
+    summary_match = re.search(r"(#+\s*Summary|^Summary)", raw, re.IGNORECASE | re.MULTILINE)
+    if summary_match:
+        raw = raw[summary_match.start():]
+
     # ── Parse SQL out of the response ──
     sql = None
     sql_match = re.search(r"SQL:\s*(SELECT[\s\S]+?)(?:\n[A-Z]|\n\n|\Z)", raw, re.IGNORECASE)
@@ -130,22 +138,16 @@ def ask_agent(prompt: str, schema_str: str) -> dict:
         if ln.strip().endswith("?")
     ]
 
-    # ── Remove SQL line and thinking lines from display text ──
-    DROP_STARTS = [
-        "sql:", "retrieved context", "formulating", "charting the results",
-        "synthesizing", "i am ready", "i will now", "i'm going to",
-        "i've analyzed", "i have analyzed", "thinking", "i'm focusing",
-    ]
+    # ── Build clean display text (remove SQL line and follow-up questions) ──
     display_lines = []
     for ln in raw.splitlines():
         clean = ln.strip()
         if not clean:
             continue
-        low = clean.lower()
-        if any(low.startswith(k) for k in DROP_STARTS):
+        if clean.lower().startswith("sql:"):
             continue
         if clean.endswith("?"):
-            continue  # handled separately
+            continue  # handled in follow-ups section
         display_lines.append(clean)
 
     summary = "\n\n".join(display_lines).strip()
@@ -159,7 +161,7 @@ def run_sql(sql: str) -> pd.DataFrame | None:
         df = bq.query(sql).to_dataframe()
         if df.empty:
             return None
-        # Coerce numerics
+        # Coerce numerics where possible
         for col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="ignore")
         return df
@@ -203,13 +205,13 @@ if prompt := st.chat_input("Ask anything about NRL stats…"):
     with st.chat_message("assistant"):
         with st.spinner("Analyzing NRL stats..."):
             try:
-                # 1. Fetch schema (cached after first call)
+                # 1. Fetch real schema (cached after first call)
                 schema_str, numeric_cols, all_cols = get_schema_string()
 
-                # 2. Ask the agent (gets summary + SQL it generated)
+                # 2. Ask agent — returns summary text + SQL it generated
                 result = ask_agent(prompt, schema_str)
 
-                # 3. Run the agent's own SQL in BigQuery → guaranteed valid columns
+                # 3. Run the agent's own SQL directly in BigQuery
                 df = None
                 if result["sql"]:
                     df = run_sql(result["sql"])
@@ -232,7 +234,7 @@ if prompt := st.chat_input("Ask anything about NRL stats…"):
                     for q in result["followups"]:
                         st.markdown(f"- {q}")
 
-                # Save to history
+                # 7. Save to history
                 history_text = result["summary"]
                 if result["followups"]:
                     fq = "\n".join(f"- {q}" for q in result["followups"])
