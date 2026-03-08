@@ -54,15 +54,19 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
     with st.chat_message("assistant"):
         try:
             client = geminidataanalytics.DataChatServiceClient()
-            # REPLACE WITH YOUR ACTUAL PROJECT/LOCATION/AGENT ID
-            agent_path = client.data_agent_path("your-project", "global", "your-agent-id")
             
-            # (Simplifying: In a real app, you'd manage conversation IDs, 
-            # but this gets you started with a single response)
+            # --- THE FIX IS HERE ---
+            MY_PROJECT = "nrl-2026-489302" 
+            MY_AGENT = "agent_84bf3396-2e84-456b-b1bd-1d386c7f80a9"
+            MY_LOCATION = "global"
+            
+            agent_path = client.data_agent_path(MY_PROJECT, MY_LOCATION, MY_AGENT)
+            
             conversation = client.create_conversation(
-                parent="projects/your-project/locations/global",
+                parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
                 conversation=geminidataanalytics.Conversation(agents=[agent_path])
             )
+            # -----------------------
             
             response = client.send_message(
                 request=geminidataanalytics.SendMessageRequest(
