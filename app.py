@@ -8,7 +8,7 @@ import pandas as pd
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="NRL Stats AI", page_icon="🏆", layout="wide")
 
-# 1. AUTHENTICATION
+# 1. AUTHENTICATION (The "Foolproof" Version)
 if "GOOGLE_CREDENTIALS" in st.secrets:
     try:
         creds_data = st.secrets["GOOGLE_CREDENTIALS"]
@@ -17,20 +17,28 @@ if "GOOGLE_CREDENTIALS" in st.secrets:
             json.dump(creds_dict, f)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "temp_key.json"
     except Exception as e:
-        st.error(f"❌ Auth Error: {e}")
+        st.error(f"❌ Authentication Error: {e}")
         st.stop()
 
-# --- MAIN UI ---
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("🏆 NRL AI Settings")
+    if st.button("Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
+
 st.title("🏆 NRL Stats AI Agent")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Show me a chart for top runners in Round 1"):
+# --- CHAT INPUT ---
+if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -40,7 +48,7 @@ if prompt := st.chat_input("Show me a chart for top runners in Round 1"):
             try:
                 client = geminidataanalytics.DataChatServiceClient()
                 
-                # CONFIG (Matches your US-Central1 dataset from Screenshot 1)
+                # --- PROJECT CONFIG (Targeting your US-Central1 data) ---
                 MY_PROJECT = "nrl-2026-489302" 
                 MY_LOCATION = "global"
                 MY_DATASET = "player_stats" 
@@ -51,7 +59,7 @@ if prompt := st.chat_input("Show me a chart for top runners in Round 1"):
                 )
                 
                 my_context = geminidataanalytics.Context(
-                    system_instruction="Expert NRL analyst. Clean insights only. No internal thoughts.",
+                    system_instruction="Expert NRL analyst. Provide summaries and insights. Do not show internal thinking steps.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
@@ -63,65 +71,63 @@ if prompt := st.chat_input("Show me a chart for top runners in Round 1"):
                     messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
                 )
                 
-                # 4. REFINED STREAM EXTRACTION
+                # 4. AGGRESSIVE EXTRACTION
                 stream = client.chat(request=request)
                 final_text = ""
-                all_dfs = []
+                found_data = []
                 
-                # Keywords that identify the "Thinking" logs from your screenshot
-                JUNK = ["Retrieved context", "Querying", "Generating", "Evaluating", "Formulate", "Thinking", "Analyzing"]
+                # Filter out the specific thinking strings from your screenshots
+                THOUGHT_KEYWORDS = ["Retrieved context", "Querying", "Generating", "Evaluating", "Formulate", "Thinking", "Analyzing", "Refining"]
 
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        # A. TEXT FILTERING
+                        # A. TEXT: Collect everything NOT in the 'Thought' list
                         if hasattr(sm, 'text'):
                             for part in sm.text.parts:
-                                # BLOCK logic: If it looks like a thinking step, skip it
-                                if any(word in part for word in JUNK):
-                                    continue
-                                # BLOCK logic: Skip follow-up question suggestions
-                                if part.strip().endswith("?"):
-                                    continue
-                                final_text += part + "\n"
+                                if not any(word in part for word in THOUGHT_KEYWORDS):
+                                    if not part.strip().endswith("?"): # Hide follow-up questions
+                                        final_text += part + "\n"
 
-                        # B. DATA CAPTURE
+                        # B. DATA: Collect and flatten ALL datasets
                         if hasattr(sm, 'data') and sm.data.result.data:
                             try:
                                 rows = []
                                 for row in sm.data.result.data:
+                                    # Convert Google's complex object to a standard Python list
                                     row_dict = MessageToDict(row._pb)
                                     if 'fields' in row_dict:
                                         flat_row = {k: list(v.values())[0] for k, v in row_dict['fields'].items()}
                                         rows.append(flat_row)
                                 if rows:
-                                    all_dfs.append(pd.DataFrame(rows))
+                                    found_data.append(pd.DataFrame(rows))
                             except:
                                 pass
 
-                # 5. DYNAMIC VISUALIZATION DISPLAY
-                if all_dfs:
-                    for df in all_dfs:
-                        st.subheader("Data Visualization")
+                # 5. RENDER VISUALS (Automatic chart detection)
+                if found_data:
+                    for df in found_data:
+                        st.subheader("Data Analysis Results")
+                        # Get only numeric columns for charts
                         num_cols = df.select_dtypes(include=['number']).columns.tolist()
                         
-                        # Use Scatter for Correlation (like Runs vs Metres)
                         if len(num_cols) >= 2:
+                            # Correlation query? Show Scatter Plot
                             st.scatter_chart(df, x=num_cols[0], y=num_cols[1], color=df.columns[0])
-                        # Use Bar for everything else
-                        else:
+                        elif len(num_cols) == 1:
+                            # Single metric? Show Bar Chart
                             st.bar_chart(df.set_index(df.columns[0]))
                         
-                        with st.expander("View Raw Data"):
-                            st.dataframe(df, use_container_width=True)
+                        # Always show the table for full detail
+                        st.dataframe(df, use_container_width=True)
 
-                # 6. DISPLAY SUMMARY
+                # 6. RENDER SUMMARY
                 if final_text.strip():
                     st.markdown(final_text)
                     st.session_state.messages.append({"role": "assistant", "content": final_text})
-                elif not all_dfs:
-                    st.warning("No answer or chart could be generated. Try: 'Compare runs and tries for Round 1 players in a table'.")
+                elif not found_data:
+                    st.error("No data found. Try: 'List top 5 players by runs in Round 1.'")
                     
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                st.error(f"❌ System Error: {e}")
