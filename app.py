@@ -63,9 +63,10 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                 my_context = geminidataanalytics.Context(
                     system_instruction=(
                         "You are an expert NRL analyst. "
-                        "Answer for end users only. "
-                        "Do NOT describe your thinking, process, SQL, or tools. "
-                        "Write a short 'Summary' section and an optional 'Insights' section."
+                        "Return three sections in this order: "
+                        "'Summary', then 'Insights', then one or more suggested follow-up "
+                        "questions on separate lines. "
+                        "Do NOT describe your process, SQL, or tools."
                     ),
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(
@@ -86,7 +87,7 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
 
                 stream = client.chat(request=request)
 
-                # Collect all raw parts, we’ll post‑filter them
+                # Collect raw text parts and any tabular data
                 text_buffer = []
                 dataframes = []
 
@@ -95,13 +96,13 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                         continue
                     sm = reply.system_message
 
-                    # ---- TEXT COLLECTION (raw) ----
+                    # TEXT
                     if getattr(sm, "text", None) is not None:
                         for part in sm.text.parts:
                             if part:
                                 text_buffer.append(part)
 
-                    # ---- DATA COLLECTION ----
+                    # DATA
                     if (
                         getattr(sm, "data", None) is not None
                         and getattr(sm.data, "result", None) is not None
@@ -114,80 +115,76 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                                 if "fields" in row_dict:
                                     flat_row = {}
                                     for col_name, val_dict in row_dict["fields"].items():
-                                        # val_dict is e.g. {"stringValue": "10"} or {"numberValue": 10}
                                         value = list(val_dict.values())[0]
                                         flat_row[col_name] = value
                                     rows.append(flat_row)
                             if rows:
                                 df = pd.DataFrame(rows)
-                                # Try to coerce numerics
+                                # Coerce numerics where possible
                                 for col in df.columns:
                                     df[col] = pd.to_numeric(df[col], errors="ignore")
                                 dataframes.append(df)
                         except Exception:
                             pass
 
-                raw_text = "\n".join(text_buffer)
+                raw_text = "\n".join(text_buffer).strip()
 
-                # ====== TEXT POST‑FILTERING TO HIDE THINKING ======
+                # ========= TEXT POST-PROCESSING =========
+                # We assume the model has already stopped exposing its thinking.
+                # We now split into main body + suggested follow-ups.
+                lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
-                # 1. Keep only content from the first "Summary" onward if present
-                #    Anything before that is treated as system/agent thinking.
-                final_text = raw_text
-                summary_idx = raw_text.lower().find("summary")
-                if summary_idx != -1:
-                    final_text = raw_text[summary_idx:]
+                main_lines = []
+                followup_lines = []
+                for ln in lines:
+                    # Treat any question at the *end* as a suggested follow-up
+                    if ln.endswith("?"):
+                        followup_lines.append(ln)
+                    else:
+                        main_lines.append(ln)
 
-                # 2. Split into lines and drop meta‑commentary that still leaked
-                lines = []
-                DROP_KEYWORDS = [
-                    "retrieved context",
-                    "formulating a query",
-                    "charting the results",
-                    "synthesizing insights from data",
-                    "i am ready to finalize my assessment",
-                    "i am ready to",
-                    "i will now",
-                    "i'm going to",
-                    "i've analyzed the data",
-                    "i have analyzed the data",
-                    "the following chart visualizes",
-                    "i'm focusing on visualization",
-                    "i'm focusing on",
-                    "thinking",
-                    "sql",
-                    "safe_cast",
-                    "safe_divide",
-                ]
-                for line in final_text.splitlines():
-                    clean_line = line.strip()
-                    if not clean_line:
-                        continue
-                    if any(k in clean_line.lower() for k in DROP_KEYWORDS):
-                        continue
-                    lines.append(clean_line)
+                main_text = "\n\n".join(main_lines).strip()
+                followup_text = "\n".join(f"- {q}" for q in followup_lines)
 
-                final_text = "\n\n".join(lines).strip()
+                # Combine for history: show main text plus a dedicated follow-up section
+                if followup_lines:
+                    display_text = (
+                        f"{main_text}\n\n\n"
+                        "### Suggested follow up questions\n\n"
+                        f"{followup_text}"
+                    )
+                else:
+                    display_text = main_text
 
-                # ====== RENDER VISUALS ======
+                # ========= VISUALISATIONS =========
                 if dataframes:
                     for df in dataframes:
                         st.subheader("Data Analysis Results")
 
                         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
-                        # If no numeric columns, still show table for debugging
                         if not numeric_cols:
                             st.info("No numeric columns detected in returned data. Showing table only.")
                             st.dataframe(df, use_container_width=True)
                             continue
 
-                        if len(numeric_cols) >= 2:
+                        # Prefer 'runs' and 'tries' if present, otherwise first two numerics
+                        runs_col_candidates = [c for c in numeric_cols if "run" in c.lower()]
+                        tries_col_candidates = [c for c in numeric_cols if "try" in c.lower()]
+
+                        if runs_col_candidates and tries_col_candidates:
+                            x_col = runs_col_candidates[0]
+                            y_col = tries_col_candidates[0]
+                        elif len(numeric_cols) >= 2:
                             x_col, y_col = numeric_cols[0], numeric_cols[1]
+                        else:
+                            x_col, y_col = None, numeric_cols[0]
+
+                        if x_col and y_col:
                             st.caption(f"Scatter: {x_col} vs {y_col}")
                             st.scatter_chart(df, x=x_col, y=y_col)
                         else:
-                            metric_col = numeric_cols[0]
+                            metric_col = y_col
                             index_candidates = [c for c in df.columns if c != metric_col]
                             if index_candidates:
                                 idx_col = index_candidates[0]
@@ -198,16 +195,18 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                             st.bar_chart(chart_df)
 
                         st.dataframe(df, use_container_width=True)
-
-                # ====== RENDER TEXT ANSWER ======
-                if final_text:
-                    st.markdown(final_text)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": final_text}
+                else:
+                    st.info(
+                        "The agent returned narrative insights but no structured table for charting. "
+                        "Try a more data-focused prompt such as "
+                        "'Return a table of runs and tries by player for Round 1.'"
                     )
-                elif not dataframes:
-                    st.error(
-                        "No data or summary returned. Try: 'List top 10 players by runs in Round 1.'"
+
+                # ========= RENDER TEXT ANSWER =========
+                if display_text:
+                    st.markdown(display_text)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": display_text}
                     )
 
             except Exception as e:
