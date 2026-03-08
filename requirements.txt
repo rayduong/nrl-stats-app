@@ -4,3 +4,4 @@ google-cloud-geminidataanalytics
 protobuf
 pandas
 db-dtypes
+plotly
