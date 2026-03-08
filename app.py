@@ -5,7 +5,7 @@ import json
 import os
 import pandas as pd
 
-# --- PAGE CONFIGURATION ---
+# --- PAGE CONFIG ---
 st.set_page_config(page_title="NRL Stats AI", page_icon="🏆", layout="wide")
 
 # 1. AUTHENTICATION
@@ -19,39 +19,28 @@ if "GOOGLE_CREDENTIALS" in st.secrets:
     except Exception as e:
         st.error(f"❌ Auth Error: {e}")
         st.stop()
-else:
-    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Secrets.")
-    st.stop()
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("🏆 NRL AI Settings")
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.rerun()
-
+# --- MAIN UI ---
 st.title("🏆 NRL Stats AI Agent")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- CHAT INPUT ---
-if prompt := st.chat_input("E.g., What is the correlation between runs and tries in Round 1?"):
+if prompt := st.chat_input("Show me a chart for top runners in Round 1"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing Round 1 Data..."):
+        with st.spinner("Executing BigQuery Stats..."):
             try:
                 client = geminidataanalytics.DataChatServiceClient()
                 
-                # CONFIG
+                # CONFIG (Matches your US-Central1 dataset from Screenshot 1)
                 MY_PROJECT = "nrl-2026-489302" 
                 MY_LOCATION = "global"
                 MY_DATASET = "player_stats" 
@@ -62,7 +51,7 @@ if prompt := st.chat_input("E.g., What is the correlation between runs and tries
                 )
                 
                 my_context = geminidataanalytics.Context(
-                    system_instruction="You are a pro NRL analyst. Output clean summaries and insights only. Do not show your internal reasoning steps.",
+                    system_instruction="Expert NRL analyst. Clean insights only. No internal thoughts.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
@@ -74,27 +63,30 @@ if prompt := st.chat_input("E.g., What is the correlation between runs and tries
                     messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
                 )
                 
-                # 4. STREAM & MULTI-DATA EXTRACTION
+                # 4. REFINED STREAM EXTRACTION
                 stream = client.chat(request=request)
                 final_text = ""
-                all_data_frames = []
+                all_dfs = []
                 
+                # Keywords that identify the "Thinking" logs from your screenshot
+                JUNK = ["Retrieved context", "Querying", "Generating", "Evaluating", "Formulate", "Thinking", "Analyzing"]
+
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        # A. CLEAN TEXT (Exclude all internal logs)
+                        # A. TEXT FILTERING
                         if hasattr(sm, 'text'):
                             for part in sm.text.parts:
-                                # BLOCK everything that looks like thinking
-                                if any(x in part for x in ["Calculating", "Formulated", "SQL", "step", "Prioritizing", "leaning"]):
+                                # BLOCK logic: If it looks like a thinking step, skip it
+                                if any(word in part for word in JUNK):
                                     continue
+                                # BLOCK logic: Skip follow-up question suggestions
                                 if part.strip().endswith("?"):
                                     continue
-                                
                                 final_text += part + "\n"
 
-                        # B. ACCUMULATE ALL DATA SETS
+                        # B. DATA CAPTURE
                         if hasattr(sm, 'data') and sm.data.result.data:
                             try:
                                 rows = []
@@ -104,38 +96,32 @@ if prompt := st.chat_input("E.g., What is the correlation between runs and tries
                                         flat_row = {k: list(v.values())[0] for k, v in row_dict['fields'].items()}
                                         rows.append(flat_row)
                                 if rows:
-                                    all_data_frames.append(pd.DataFrame(rows))
+                                    all_dfs.append(pd.DataFrame(rows))
                             except:
                                 pass
 
-                # 5. DYNAMIC VISUALIZATION ENGINE
-                for df in all_data_frames:
-                    cols = [c.lower() for c in df.columns]
-                    
-                    # 1. SCATTER CHART (Correlation)
-                    if ('runs' in cols or 'total_runs' in cols) and ('tries' in cols or 'tries_scored' in cols):
-                        st.subheader("Correlation: Runs vs Tries")
-                        # Find the exact column names (case sensitive)
-                        x_col = next(c for c in df.columns if c.lower() in ['runs', 'total_runs'])
-                        y_col = next(c for c in df.columns if c.lower() in ['tries', 'tries_scored'])
-                        st.scatter_chart(df, x=x_col, y=y_col, color='player' if 'player' in df.columns else None)
-                    
-                    # 2. BAR CHART (Top Performers)
-                    elif len(df) <= 15: # Likely a 'Top 10' or 'Top 15' list
-                        st.subheader("Top Performers Breakdown")
-                        st.bar_chart(df.set_index(df.columns[0]))
-                    
-                    # 3. DATA TABLE (General)
-                    else:
-                        with st.expander("View Full Dataset"):
+                # 5. DYNAMIC VISUALIZATION DISPLAY
+                if all_dfs:
+                    for df in all_dfs:
+                        st.subheader("Data Visualization")
+                        num_cols = df.select_dtypes(include=['number']).columns.tolist()
+                        
+                        # Use Scatter for Correlation (like Runs vs Metres)
+                        if len(num_cols) >= 2:
+                            st.scatter_chart(df, x=num_cols[0], y=num_cols[1], color=df.columns[0])
+                        # Use Bar for everything else
+                        else:
+                            st.bar_chart(df.set_index(df.columns[0]))
+                        
+                        with st.expander("View Raw Data"):
                             st.dataframe(df, use_container_width=True)
 
                 # 6. DISPLAY SUMMARY
                 if final_text.strip():
                     st.markdown(final_text)
                     st.session_state.messages.append({"role": "assistant", "content": final_text})
-                elif not all_data_frames:
-                    st.warning("Query completed, but no charts or summary were returned. Try rephrasing.")
+                elif not all_dfs:
+                    st.warning("No answer or chart could be generated. Try: 'Compare runs and tries for Round 1 players in a table'.")
                     
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"❌ Error: {e}")
