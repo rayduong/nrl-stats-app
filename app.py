@@ -25,7 +25,7 @@ else:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("🏆 NRL Agent Settings")
+    st.title("🏆 NRL AI Settings")
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.rerun()
@@ -35,21 +35,23 @@ st.title("🏆 NRL Stats AI Agent")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 # --- CHAT INPUT ---
-if prompt := st.chat_input("E.g., Compare top try scorers with a bar chart"):
+if prompt := st.chat_input("E.g., What is the correlation between runs and tries in Round 1?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing NRL Data..."):
+        with st.spinner("Analyzing Round 1 Data..."):
             try:
                 client = geminidataanalytics.DataChatServiceClient()
                 
+                # CONFIG
                 MY_PROJECT = "nrl-2026-489302" 
                 MY_LOCATION = "global"
                 MY_DATASET = "player_stats" 
@@ -60,7 +62,7 @@ if prompt := st.chat_input("E.g., Compare top try scorers with a bar chart"):
                 )
                 
                 my_context = geminidataanalytics.Context(
-                    system_instruction="You are a professional NRL analyst. Provide summaries and insights. Do not show internal thinking steps.",
+                    system_instruction="You are a pro NRL analyst. Output clean summaries and insights only. Do not show your internal reasoning steps.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
@@ -72,67 +74,68 @@ if prompt := st.chat_input("E.g., Compare top try scorers with a bar chart"):
                     messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
                 )
                 
-                # 4. STREAM & DYNAMIC EXTRACTION
+                # 4. STREAM & MULTI-DATA EXTRACTION
                 stream = client.chat(request=request)
                 final_text = ""
-                data_list = []
+                all_data_frames = []
                 
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        # A. CLEAN TEXT EXTRACTION
+                        # A. CLEAN TEXT (Exclude all internal logs)
                         if hasattr(sm, 'text'):
                             for part in sm.text.parts:
-                                # Block "Thinking" and "Refining" segments
-                                if any(x in part for x in ["Summary", "Insights", "Round 1"]):
-                                    if not any(y in part for y in ["Refining", "Considering", "Analyzing"]):
-                                        if not part.strip().endswith("?"):
-                                            final_text += part + "\n"
+                                # BLOCK everything that looks like thinking
+                                if any(x in part for x in ["Calculating", "Formulated", "SQL", "step", "Prioritizing", "leaning"]):
+                                    continue
+                                if part.strip().endswith("?"):
+                                    continue
+                                
+                                final_text += part + "\n"
 
-                        # B. DYNAMIC DATA COLLECTION
+                        # B. ACCUMULATE ALL DATA SETS
                         if hasattr(sm, 'data') and sm.data.result.data:
                             try:
+                                rows = []
                                 for row in sm.data.result.data:
                                     row_dict = MessageToDict(row._pb)
                                     if 'fields' in row_dict:
                                         flat_row = {k: list(v.values())[0] for k, v in row_dict['fields'].items()}
-                                        data_list.append(flat_row)
+                                        rows.append(flat_row)
+                                if rows:
+                                    all_data_frames.append(pd.DataFrame(rows))
                             except:
                                 pass
 
-                # 5. INTELLIGENT VISUALIZATION
-                if data_list:
-                    df = pd.DataFrame(data_list)
-                    cols = df.columns.tolist()
+                # 5. DYNAMIC VISUALIZATION ENGINE
+                for df in all_data_frames:
+                    cols = [c.lower() for c in df.columns]
                     
-                    st.subheader("Data Visualization")
+                    # 1. SCATTER CHART (Correlation)
+                    if ('runs' in cols or 'total_runs' in cols) and ('tries' in cols or 'tries_scored' in cols):
+                        st.subheader("Correlation: Runs vs Tries")
+                        # Find the exact column names (case sensitive)
+                        x_col = next(c for c in df.columns if c.lower() in ['runs', 'total_runs'])
+                        y_col = next(c for c in df.columns if c.lower() in ['tries', 'tries_scored'])
+                        st.scatter_chart(df, x=x_col, y=y_col, color='player' if 'player' in df.columns else None)
                     
-                    # Logic to decide the chart type
-                    if len(cols) >= 2:
-                        # 1. SCATTER: If two or more numeric columns exist (e.g., runs vs metres)
-                        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-                        if len(numeric_cols) >= 2:
-                            st.scatter_chart(df, x=numeric_cols[0], y=numeric_cols[1], color=cols[0])
-                        
-                        # 2. LINE: If a time-based or sequence column exists (e.g., Round)
-                        elif any(x in str(cols).lower() for x in ['round', 'date', 'time']):
-                            st.line_chart(df.set_index(cols[0]))
-                            
-                        # 3. BAR: Default for categorical stats (e.g., Player vs Tries)
-                        else:
-                            st.bar_chart(df.set_index(cols[0]))
+                    # 2. BAR CHART (Top Performers)
+                    elif len(df) <= 15: # Likely a 'Top 10' or 'Top 15' list
+                        st.subheader("Top Performers Breakdown")
+                        st.bar_chart(df.set_index(df.columns[0]))
                     
-                    # Always show the raw table in an expander for transparency
-                    with st.expander("View Raw Data Table"):
-                        st.dataframe(df, use_container_width=True)
+                    # 3. DATA TABLE (General)
+                    else:
+                        with st.expander("View Full Dataset"):
+                            st.dataframe(df, use_container_width=True)
 
-                # 6. DISPLAY FINAL TEXT
+                # 6. DISPLAY SUMMARY
                 if final_text.strip():
                     st.markdown(final_text)
                     st.session_state.messages.append({"role": "assistant", "content": final_text})
-                elif not data_list:
-                    st.warning("Query processed, but no summary or data was generated.")
+                elif not all_data_frames:
+                    st.warning("Query completed, but no charts or summary were returned. Try rephrasing.")
                     
             except Exception as e:
                 st.error(f"Error: {e}")
