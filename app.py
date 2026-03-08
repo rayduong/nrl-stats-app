@@ -59,6 +59,25 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             MY_AGENT = "agent_84bf3396-2e84-456b-b1bd-1d386c7f80a9"
             MY_LOCATION = "global"
             
+            # --- NEW: Give the API the exact map to your table ---
+            MY_DATASET = "round_data" # <-- Change this (e.g., "nrl_stats")
+            MY_TABLE = "player_stats_test_2"     # <-- Change this (e.g., "player_data_2026")
+            
+            bq_ref = geminidataanalytics.BigQueryTableReference(
+                project_id=MY_PROJECT,
+                dataset_id=MY_DATASET,
+                table_id=MY_TABLE
+            )
+            
+            my_context = geminidataanalytics.Context(
+                datasource_references=geminidataanalytics.DatasourceReferences(
+                    bq=geminidataanalytics.BigQueryTableReferences(
+                        table_references=[bq_ref]
+                    )
+                )
+            )
+            # -----------------------------------------------------
+            
             agent_path = client.data_agent_path(MY_PROJECT, MY_LOCATION, MY_AGENT)
             
             # 1. Create a new conversation session
@@ -67,9 +86,10 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 conversation=geminidataanalytics.Conversation(agents=[agent_path])
             )
             
-            # 2. Package the question using the new ChatRequest format
+            # 2. Package the question and the data map (inline_context)
             request = geminidataanalytics.ChatRequest(
                 parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
+                inline_context=my_context, # <-- We pass the map here!
                 messages=[
                     geminidataanalytics.Message(
                         user_message=geminidataanalytics.UserMessage(text=prompt)
@@ -80,17 +100,15 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 )
             )
             
-            # 3. Call the new 'chat' method (This returns a stream)
+            # 3. Call the chat method
             stream = client.chat(request=request)
             
             # 4. Loop through the stream and collect the text
             answer = ""
             for reply in stream:
-                # Safely check if this specific chunk contains text
                 if hasattr(reply.message, "text_message") and reply.message.text_message.text:
                     answer += reply.message.text_message.text + "\n\n"
             
-            # Display the final combined answer
             st.markdown(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
             
