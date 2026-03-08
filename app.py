@@ -300,7 +300,7 @@ if prompt := st.chat_input("Ask anything about NRL stats…"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing NRL stats..."):
+        with st.spinner("G'day mate, have a 🍺 whilst I check on..."):
             try:
                 # 1. Fetch real schema (cached after first call)
                 schema_str, numeric_cols, all_cols = get_schema_string()
