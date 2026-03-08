@@ -86,27 +86,16 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 ]
             )
             
-            # 4. Stream the response safely
+            # 4. Stream the response (Diagnostic Mode)
             stream = client.chat(request=request)
             
-            answer = ""
+            answer = "Diagnostic mode active. Check the raw output above."
             for reply in stream:
-                try:
-                    # The stream yields 'Message' objects directly, so we drop '.message'
-                    tm = reply.text_message
-                    
-                    if tm:
-                        # Safely check available fields using the Protobuf DESCRIPTOR
-                        available_fields = [f.name for f in tm.DESCRIPTOR.fields]
-                        
-                        if "text" in available_fields and tm.text:
-                            answer += tm.text
-                        elif "parts" in available_fields and tm.parts:
-                            # Append the final part (often the full generated text)
-                            answer += str(tm.parts[-1]) + "\n\n"
-                except Exception:
-                    # Ignore unexpected stream chunks and keep moving
-                    pass
+                # Print the raw data to the screen so we can see its exact shape
+                st.info("🔍 RAW CHUNK RECEIVED:")
+                st.code(str(reply))
+                
+            st.session_state.messages.append({"role": "assistant", "content": answer})
             
             # Display the final answer
             st.markdown(answer)
