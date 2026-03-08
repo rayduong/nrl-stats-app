@@ -61,7 +61,7 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                 )
                 
                 my_context = geminidataanalytics.Context(
-                    system_instruction="You are a professional NRL analyst. Provide clean summaries. Do not include internal thoughts or thinking steps.",
+                    system_instruction="You are a professional NRL analyst. Provide summaries and insights. Do not include your internal thinking steps.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
@@ -78,41 +78,44 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                 final_text = ""
                 table_df = None
                 
+                # List of keywords that identify 'Thoughts' we want to hide
+                JUNK_KEYWORDS = ["Retrieved context", "Examining Player", "formulating a query", "Summarizing Latrell", "received the SQL"]
+
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        # A. CLEAN TEXT EXTRACTION
+                        # A. TEXT EXTRACTION (Exclusion Method)
                         if hasattr(sm, 'text'):
-                            # Only capture FINAL_RESPONSE (Type 3)
-                            # We also filter out segments that end with a '?' to remove suggested questions
-                            if "FINAL_RESPONSE" in str(sm.text.text_type) or sm.text.text_type == 3:
-                                for part in sm.text.parts:
-                                    if not part.strip().endswith("?"):
-                                        final_text += part + "\n"
+                            for part in sm.text.parts:
+                                # 1. Strip out follow-up questions
+                                if part.strip().endswith("?"):
+                                    continue
+                                
+                                # 2. Strip out internal thoughts using our keyword list
+                                if any(junk in part for junk in JUNK_KEYWORDS):
+                                    continue
+                                
+                                # 3. If it passed those checks, it's our answer!
+                                final_text += part + "\n"
 
-                        # B. DATA TABLE EXTRACTION (The Fix)
+                        # B. DATA TABLE EXTRACTION
                         if hasattr(sm, 'data') and sm.data.result.data:
                             try:
                                 rows = []
                                 for row in sm.data.result.data:
-                                    # Convert the Protobuf 'MapComposite' to a standard Python dict
                                     row_dict = MessageToDict(row._pb)
-                                    # Extract the actual values from the 'fields' key
                                     if 'fields' in row_dict:
-                                        # Flattens { 'fields': { 'player': {'string_value': 'Name'} } } 
-                                        # into { 'player': 'Name' }
                                         flat_row = {}
                                         for k, v in row_dict['fields'].items():
-                                            # Grab the first available value (string, number, etc)
-                                            flat_row[k] = list(v.values())[0]
+                                            # Safely get whatever value is inside (string, number, etc)
+                                            val = list(v.values())[0]
+                                            flat_row[k] = val
                                         rows.append(flat_row)
-                                
                                 if rows:
                                     table_df = pd.DataFrame(rows)
-                            except Exception as data_err:
-                                # If table parsing fails, we don't want to crash the whole app
-                                print(f"Table Parse Error: {data_err}")
+                            except Exception:
+                                pass # Silently ignore data errors to keep text flowing
 
                 # 5. DISPLAY RESULTS
                 if table_df is not None and not table_df.empty:
@@ -123,7 +126,7 @@ if prompt := st.chat_input("Ask about Round 1 stats..."):
                     st.markdown(final_text)
                     st.session_state.messages.append({"role": "assistant", "content": final_text})
                 elif table_df is None:
-                    st.warning("The agent processed the query but didn't return a final summary or table.")
+                    st.warning("The agent didn't return a text summary. Please try asking: 'Show me Latrell Mitchell's stats for Round 1 in a table.'")
                     
             except Exception as e:
                 st.error(f"Main Error: {e}")
