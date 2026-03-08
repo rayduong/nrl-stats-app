@@ -8,7 +8,7 @@ import pandas as pd
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="NRL Stats AI", page_icon="🏆", layout="wide")
 
-# 1. AUTHENTICATION (The "Foolproof" Version)
+# 1. AUTHENTICATION
 if "GOOGLE_CREDENTIALS" in st.secrets:
     try:
         creds_data = st.secrets["GOOGLE_CREDENTIALS"]
@@ -55,15 +55,17 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                 MY_TABLE = "player_stats_test_2"
 
                 bq_ref = geminidataanalytics.BigQueryTableReference(
-                    project_id=MY_PROJECT, dataset_id=MY_DATASET, table_id=MY_TABLE
+                    project_id=MY_PROJECT,
+                    dataset_id=MY_DATASET,
+                    table_id=MY_TABLE
                 )
 
                 my_context = geminidataanalytics.Context(
                     system_instruction=(
                         "You are an expert NRL analyst. "
-                        "Provide concise summaries and insights for end users. "
-                        "Do NOT describe your internal reasoning, SQL generation, or tools. "
-                        "Only output user-facing explanations of the results."
+                        "Answer for end users only. "
+                        "Do NOT describe your thinking, process, SQL, or tools. "
+                        "Write a short 'Summary' section and an optional 'Insights' section."
                     ),
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(
@@ -84,49 +86,22 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
 
                 stream = client.chat(request=request)
 
-                # Collect only final user-facing text and tabular data
-                final_text_chunks = []
-                found_data = []
-
-                # Strings we don't want to show even if they slip through
-                HIDE_KEYWORDS = [
-                    "sql",
-                    "SAFE_CAST",
-                    "SAFE_DIVIDE",
-                    "query plan",
-                    "refined SQL query",
-                    "I will now",
-                    "I'm going to",
-                    "thinking",
-                    "reasoning",
-                    "step",
-                    "tool",
-                ]
+                # Collect all raw parts, we’ll post‑filter them
+                text_buffer = []
+                dataframes = []
 
                 for reply in stream:
-                    # Each reply is a Message
-                    # We only care about system_message because it contains
-                    # the model's streamed content and data.
                     if not hasattr(reply, "system_message"):
                         continue
-
                     sm = reply.system_message
 
-                    # --- TEXT: collect only user-facing parts ---
+                    # ---- TEXT COLLECTION (raw) ----
                     if getattr(sm, "text", None) is not None:
-                        # sm.text.parts is a list of simple strings in Python client
                         for part in sm.text.parts:
-                            if not part:
-                                continue
-                            # Filter any line that clearly looks like reasoning / SQL commentary
-                            if any(k.lower() in part.lower() for k in HIDE_KEYWORDS):
-                                continue
-                            # Optional: hide automatic follow-up questions if you want
-                            if part.strip().endswith("?"):
-                                continue
-                            final_text_chunks.append(part)
+                            if part:
+                                text_buffer.append(part)
 
-                    # --- DATA: flatten any result data into DataFrames ---
+                    # ---- DATA COLLECTION ----
                     if (
                         getattr(sm, "data", None) is not None
                         and getattr(sm.data, "result", None) is not None
@@ -135,69 +110,104 @@ if prompt := st.chat_input("Show me a chart of runs vs tries for Round 1"):
                         try:
                             rows = []
                             for row in sm.data.result.data:
-                                # Convert protobuf Row to dict
                                 row_dict = MessageToDict(row._pb)
-                                # Expect schema: {"fields": {"col": {"stringValue": "x"} ...}}
                                 if "fields" in row_dict:
                                     flat_row = {}
                                     for col_name, val_dict in row_dict["fields"].items():
-                                        # val_dict is like {"stringValue": "..."} or {"numberValue": 123}
+                                        # val_dict is e.g. {"stringValue": "10"} or {"numberValue": 10}
                                         value = list(val_dict.values())[0]
                                         flat_row[col_name] = value
                                     rows.append(flat_row)
                             if rows:
                                 df = pd.DataFrame(rows)
-
-                                # Try to coerce numeric columns
+                                # Try to coerce numerics
                                 for col in df.columns:
                                     df[col] = pd.to_numeric(df[col], errors="ignore")
-
-                                found_data.append(df)
+                                dataframes.append(df)
                         except Exception:
-                            # Swallow data flattening errors, but don't break chat
                             pass
 
-                final_text = "\n".join(final_text_chunks).strip()
+                raw_text = "\n".join(text_buffer)
 
-                # 5. RENDER VISUALS
-                if found_data:
-                    for df in found_data:
+                # ====== TEXT POST‑FILTERING TO HIDE THINKING ======
+
+                # 1. Keep only content from the first "Summary" onward if present
+                #    Anything before that is treated as system/agent thinking.
+                final_text = raw_text
+                summary_idx = raw_text.lower().find("summary")
+                if summary_idx != -1:
+                    final_text = raw_text[summary_idx:]
+
+                # 2. Split into lines and drop meta‑commentary that still leaked
+                lines = []
+                DROP_KEYWORDS = [
+                    "retrieved context",
+                    "formulating a query",
+                    "charting the results",
+                    "synthesizing insights from data",
+                    "i am ready to finalize my assessment",
+                    "i am ready to",
+                    "i will now",
+                    "i'm going to",
+                    "i've analyzed the data",
+                    "i have analyzed the data",
+                    "the following chart visualizes",
+                    "i'm focusing on visualization",
+                    "i'm focusing on",
+                    "thinking",
+                    "sql",
+                    "safe_cast",
+                    "safe_divide",
+                ]
+                for line in final_text.splitlines():
+                    clean_line = line.strip()
+                    if not clean_line:
+                        continue
+                    if any(k in clean_line.lower() for k in DROP_KEYWORDS):
+                        continue
+                    lines.append(clean_line)
+
+                final_text = "\n\n".join(lines).strip()
+
+                # ====== RENDER VISUALS ======
+                if dataframes:
+                    for df in dataframes:
                         st.subheader("Data Analysis Results")
 
-                        # Numeric columns for charts
-                        num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+                        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
 
-                        if len(num_cols) >= 2:
-                            # Scatter chart – use first two numeric cols
-                            x_col = num_cols[0]
-                            y_col = num_cols[1]
+                        # If no numeric columns, still show table for debugging
+                        if not numeric_cols:
+                            st.info("No numeric columns detected in returned data. Showing table only.")
+                            st.dataframe(df, use_container_width=True)
+                            continue
+
+                        if len(numeric_cols) >= 2:
+                            x_col, y_col = numeric_cols[0], numeric_cols[1]
                             st.caption(f"Scatter: {x_col} vs {y_col}")
                             st.scatter_chart(df, x=x_col, y=y_col)
-                        elif len(num_cols) == 1:
-                            metric_col = num_cols[0]
-                            st.caption(f"Bar chart of {metric_col}")
-                            # Use first non-numeric column (if any) as index/labels
+                        else:
+                            metric_col = numeric_cols[0]
                             index_candidates = [c for c in df.columns if c != metric_col]
                             if index_candidates:
                                 idx_col = index_candidates[0]
                                 chart_df = df.set_index(idx_col)[[metric_col]]
                             else:
-                                # Fallback to numeric index
                                 chart_df = df[[metric_col]]
+                            st.caption(f"Bar chart of {metric_col}")
                             st.bar_chart(chart_df)
 
-                        # Always show table
                         st.dataframe(df, use_container_width=True)
 
-                # 6. RENDER SUMMARY
+                # ====== RENDER TEXT ANSWER ======
                 if final_text:
                     st.markdown(final_text)
                     st.session_state.messages.append(
                         {"role": "assistant", "content": final_text}
                     )
-                elif not found_data:
+                elif not dataframes:
                     st.error(
-                        "No data found. Try: 'List top 5 players by runs in Round 1.'"
+                        "No data or summary returned. Try: 'List top 10 players by runs in Round 1.'"
                     )
 
             except Exception as e:
