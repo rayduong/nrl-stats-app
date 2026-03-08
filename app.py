@@ -87,24 +87,28 @@ if prompt := st.chat_input("E.g., Who scored the most tries in Round 1?"):
                 ]
             )
             
-            # 4. Stream the response and extract only the FINAL_RESPONSE
+            # 4. Stream the response safely
             stream = client.chat(request=request)
             
             answer = ""
             for reply in stream:
-                # Check if this chunk is a 'system_message'
+                # 1. Check if the reply has a system_message
                 if hasattr(reply, 'system_message'):
                     sm = reply.system_message
-                    # We only want to show parts tagged as FINAL_RESPONSE
-                    if sm.text.text_type == geminidataanalytics.Text.TextType.FINAL_RESPONSE:
-                        for part in sm.text.parts:
-                            answer += part + "\n"
+                    
+                    # 2. Check if that message has text
+                    if hasattr(sm, 'text'):
+                        # 3. Check for FINAL_RESPONSE (Numeric value 3)
+                        # This avoids the "no attribute 'Text'" error
+                        if sm.text.text_type == 3: 
+                            for part in sm.text.parts:
+                                answer += part + "\n"
             
             if answer:
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
             else:
-                st.warning("The agent processed the request but didn't return a final text response.")
+                st.warning("The agent processed the query but no final text was returned. Try rephrasing your question!")
             
         except Exception as e:
             st.error(f"Error: {e}")
