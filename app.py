@@ -7,13 +7,33 @@ import os
 st.title("🏆 NRL Stats AI Agent")
 st.write("Ask me anything about player stats from the current season.")
 
-# 2. AUTHENTICATION (How the app "logs in" to Google)
-# We will pull the key from Streamlit's "Secrets" tool later
+# 2. AUTHENTICATION (The "Foolproof" Version)
 if "GOOGLE_CREDENTIALS" in st.secrets:
-    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-    with open("temp_key.json", "w") as f:
-        json.dump(creds_dict, f)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "temp_key.json"
+    try:
+        # Get the secret
+        creds_data = st.secrets["GOOGLE_CREDENTIALS"]
+        
+        # Check: Is it already a dictionary (processed) or a string (raw text)?
+        if isinstance(creds_data, str):
+            # It's a string, so we need to "load" it
+            creds_dict = json.loads(creds_data)
+        else:
+            # It's already a dictionary/object, so we can use it directly
+            # We convert it to a standard dict just to be safe
+            creds_dict = dict(creds_data)
+            
+        # Create the temporary file for Google Cloud to use
+        with open("temp_key.json", "w") as f:
+            json.dump(creds_dict, f)
+            
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "temp_key.json"
+        
+    except Exception as e:
+        st.error(f"❌ There is a problem with your Google Secrets: {e}")
+        st.stop()
+else:
+    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Streamlit Secrets.")
+    st.stop()
 
 # 3. THE CHAT LOGIC
 if "messages" not in st.session_state:
