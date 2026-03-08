@@ -57,7 +57,7 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             
             MY_PROJECT = "nrl-2026-489302" 
             MY_AGENT = "agent_84bf3396-2e84-456b-b1bd-1d386c7f80a9"
-            MY_LOCATION = "global"
+            MY_LOCATION = "us-central1"
             
             agent_path = client.data_agent_path(MY_PROJECT, MY_LOCATION, MY_AGENT)
             
