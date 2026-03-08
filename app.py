@@ -59,8 +59,8 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             MY_LOCATION = "global"
             
             # 1. Provide the exact Data Map
-            MY_DATASET = "YOUR_DATASET_NAME" # <-- Replace with your dataset (e.g., nrl_stats)
-            MY_TABLE = "YOUR_TABLE_NAME"     # <-- Replace with your table (e.g., player_data)
+            MY_DATASET = "player_stats" # <-- Replace with your dataset (e.g., nrl_stats)
+            MY_TABLE = "player_stats_test_2"     # <-- Replace with your table (e.g., player_data)
             
             bq_ref = geminidataanalytics.BigQueryTableReference(
                 project_id=MY_PROJECT,
