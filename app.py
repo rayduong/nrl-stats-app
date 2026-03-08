@@ -3,39 +3,43 @@ from google.cloud import geminidataanalytics
 import json
 import os
 
-# 1. SETUP THE INTERFACE (The part users see)
-st.title("🏆 NRL Stats AI Agent")
-st.write("Ask me anything about player stats from the current season.")
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="NRL Stats AI", page_icon="🏆")
 
-# 2. AUTHENTICATION (The "Foolproof" Version)
+# 1. AUTHENTICATION (The "Foolproof" Version)
 if "GOOGLE_CREDENTIALS" in st.secrets:
     try:
-        # Get the secret
         creds_data = st.secrets["GOOGLE_CREDENTIALS"]
-        
-        # Check: Is it already a dictionary (processed) or a string (raw text)?
+        # Handle both string and dictionary formats from Streamlit Secrets
         if isinstance(creds_data, str):
-            # It's a string, so we need to "load" it
             creds_dict = json.loads(creds_data)
         else:
-            # It's already a dictionary/object, so we can use it directly
-            # We convert it to a standard dict just to be safe
             creds_dict = dict(creds_data)
             
-        # Create the temporary file for Google Cloud to use
         with open("temp_key.json", "w") as f:
             json.dump(creds_dict, f)
             
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "temp_key.json"
-        
     except Exception as e:
-        st.error(f"❌ There is a problem with your Google Secrets: {e}")
+        st.error(f"❌ Secret Key Error: {e}")
         st.stop()
 else:
-    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Streamlit Secrets.")
+    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Secrets.")
     st.stop()
 
-# 3. THE CHAT LOGIC
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("Settings")
+    if st.button("Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
+    st.info("Ask about player tries, run metres, or team stats from Round 1.")
+
+# --- MAIN INTERFACE ---
+st.title("🏆 NRL Stats AI Agent")
+st.write("Real-time insights powered by BigQuery.")
+
+# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -44,71 +48,62 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# User input box
+# User input
 if prompt := st.chat_input("E.g., Who scored the most tries in Round 1?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Call the BigQuery Agent
+    # 3. CALL THE BIGQUERY AGENT
     with st.chat_message("assistant"):
         try:
             client = geminidataanalytics.DataChatServiceClient()
             
+            # --- PROJECT CONFIGURATION ---
             MY_PROJECT = "nrl-2026-489302" 
             MY_LOCATION = "global"
-            
-            # --- Ensure these match your actual BigQuery location exactly ---
             MY_DATASET = "player_stats" 
             MY_TABLE = "player_stats_test_2"
             
+            # Create the data reference
             bq_ref = geminidataanalytics.BigQueryTableReference(
                 project_id=MY_PROJECT,
                 dataset_id=MY_DATASET,
                 table_id=MY_TABLE
             )
             
+            # Define the agent's persona and data map
             my_context = geminidataanalytics.Context(
-                system_instruction="You are an expert NRL stats analyst. Query the BigQuery table to answer user questions.",
+                system_instruction="You are an expert NRL analyst. Use the provided table to answer questions with stats and insights.",
                 datasource_references=geminidataanalytics.DatasourceReferences(
-                    bq=geminidataanalytics.BigQueryTableReferences(
-                        table_references=[bq_ref]
-                    )
+                    bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                 )
             )
             
             request = geminidataanalytics.ChatRequest(
                 parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
                 inline_context=my_context,
-                messages=[
-                    geminidataanalytics.Message(
-                        user_message=geminidataanalytics.UserMessage(text=prompt)
-                    )
-                ]
+                messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
             )
             
-            # 4. Stream the response safely
+            # 4. STREAM & EXTRACT RESPONSE
             stream = client.chat(request=request)
+            full_response = ""
             
-            answer = ""
             for reply in stream:
-                # 1. Check if the reply has a system_message
                 if hasattr(reply, 'system_message'):
                     sm = reply.system_message
-                    
-                    # 2. Check if that message has text
-                    if hasattr(sm, 'text'):
-                        # 3. Check for FINAL_RESPONSE (Numeric value 3)
-                        # This avoids the "no attribute 'Text'" error
-                        if sm.text.text_type == 3: 
-                            for part in sm.text.parts:
-                                answer += part + "\n"
-            
-            if answer:
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+                    if hasattr(sm, 'text') and sm.text.parts:
+                        # Only collect text that isn't background 'thinking'
+                        chunk = " ".join(sm.text.parts)
+                        if "Retrieved context" not in chunk and "crafted a SQL" not in chunk:
+                            full_response += chunk + "\n\n"
+
+            if full_response.strip():
+                st.markdown(full_response)
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
             else:
-                st.warning("The agent processed the query but no final text was returned. Try rephrasing your question!")
-            
+                st.warning("Agent found data but didn't generate a text summary. Try asking specifically for a list or summary.")
+                
         except Exception as e:
             st.error(f"Error: {e}")
