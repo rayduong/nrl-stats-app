@@ -2,125 +2,115 @@ import streamlit as st
 from google.cloud import geminidataanalytics
 import json
 import os
+import pandas as pd
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="NRL Stats AI", page_icon="🏆", layout="centered")
+st.set_page_config(page_title="NRL Stats AI", page_icon="🏆", layout="wide")
 
-# 1. AUTHENTICATION (The "Foolproof" Secrets Version)
+# 1. AUTHENTICATION
 if "GOOGLE_CREDENTIALS" in st.secrets:
     try:
         creds_data = st.secrets["GOOGLE_CREDENTIALS"]
-        # Handle both raw string and auto-parsed dictionary formats
-        if isinstance(creds_data, str):
-            creds_dict = json.loads(creds_data)
-        else:
-            creds_dict = dict(creds_data)
-            
+        creds_dict = json.loads(creds_data) if isinstance(creds_data, str) else dict(creds_data)
         with open("temp_key.json", "w") as f:
             json.dump(creds_dict, f)
-            
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "temp_key.json"
     except Exception as e:
-        st.error(f"❌ Authentication Secret Error: {e}")
+        st.error(f"❌ Auth Error: {e}")
         st.stop()
 else:
-    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Streamlit Secrets.")
+    st.error("❌ 'GOOGLE_CREDENTIALS' not found in Secrets.")
     st.stop()
 
-# --- SIDEBAR & UI ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.title("🏆 NRL AI Settings")
+    st.title("🏆 NRL Agent Settings")
     if st.button("Clear Chat History"):
         st.session_state.messages = []
         st.rerun()
-    st.info("Ask about Round 1 player stats, tries, or team performances.")
 
 st.title("🏆 NRL Stats AI Agent")
-st.caption("Querying live BigQuery data for Round 1 insights.")
 
-# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
+# Display previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- CHAT INPUT & CORE LOGIC ---
-if prompt := st.chat_input("E.g., Which player scored the most tries in Round 1?"):
+# --- CHAT INPUT ---
+if prompt := st.chat_input("Ask about Round 1 stats..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        # Add a professional spinner so users know the AI is working
-        with st.spinner("Analyzing BigQuery data..."):
+        with st.spinner("Querying NRL Database..."):
             try:
                 client = geminidataanalytics.DataChatServiceClient()
                 
-                # --- PROJECT CONFIGURATION ---
                 MY_PROJECT = "nrl-2026-489302" 
                 MY_LOCATION = "global"
                 MY_DATASET = "player_stats" 
                 MY_TABLE = "player_stats_test_2"
                 
-                # 1. Create Data Reference
                 bq_ref = geminidataanalytics.BigQueryTableReference(
-                    project_id=MY_PROJECT,
-                    dataset_id=MY_DATASET,
-                    table_id=MY_TABLE
+                    project_id=MY_PROJECT, dataset_id=MY_DATASET, table_id=MY_TABLE
                 )
                 
-                # 2. Define Agent "Brain" (System Instruction)
                 my_context = geminidataanalytics.Context(
-                    system_instruction="""You are an expert NRL data analyst. 
-                    Answer player stat questions based ONLY on the provided table. 
-                    If a player name has a typo, use fuzzy matching. 
-                    Always provide a clear summary and interesting insights.""",
+                    system_instruction="You are a professional NRL analyst. Provide clean summaries. Do not include internal thoughts.",
                     datasource_references=geminidataanalytics.DatasourceReferences(
                         bq=geminidataanalytics.BigQueryTableReferences(table_references=[bq_ref])
                     )
                 )
                 
-                # 3. Build the Request
                 request = geminidataanalytics.ChatRequest(
                     parent=f"projects/{MY_PROJECT}/locations/{MY_LOCATION}",
                     inline_context=my_context,
-                    messages=[
-                        geminidataanalytics.Message(
-                            user_message=geminidataanalytics.UserMessage(text=prompt)
-                        )
-                    ]
+                    messages=[geminidataanalytics.Message(user_message=geminidataanalytics.UserMessage(text=prompt))]
                 )
                 
-                # 4. THE STREAMING BUCKET STRATEGY
+                # 4. STREAM & SURGICAL EXTRACTION
                 stream = client.chat(request=request)
-                answer = ""
+                final_text = ""
+                table_data = None
                 
                 for reply in stream:
                     if hasattr(reply, 'system_message'):
                         sm = reply.system_message
                         
-                        if hasattr(sm, 'text') and sm.text.parts:
-                            # Convert type to string for safety across library versions
-                            t_type = str(sm.text.text_type).upper()
-                            
-                            # Filter: If it's NOT a 'THOUGHT', it's likely part of the answer
-                            if "THOUGHT" not in t_type:
+                        # A. EXTRACT THE CLEAN TEXT
+                        if hasattr(sm, 'text'):
+                            # Type 3 is strictly the FINAL_RESPONSE summary
+                            if sm.text.text_type == 3 or "FINAL_RESPONSE" in str(sm.text.text_type):
                                 for part in sm.text.parts:
-                                    # Don't repeat the user's prompt back to them
-                                    if part.strip() != prompt.strip():
-                                        answer += part + "\n"
+                                    # We skip parts that look like follow-up questions (ending in ?)
+                                    if not part.strip().endswith("?"):
+                                        final_text += part + "\n"
 
-                # 5. FINAL DISPLAY
-                if answer.strip():
-                    # Clean up triple-newlines and show result
-                    clean_answer = answer.replace("\n\n\n", "\n\n").strip()
-                    st.markdown(clean_answer)
-                    st.session_state.messages.append({"role": "assistant", "content": clean_answer})
-                else:
-                    st.warning("Data found, but no text summary generated. Try asking: 'Give me a summary of Latrell Mitchell's stats.'")
+                        # B. EXTRACT THE DATA TABLE
+                        if hasattr(sm, 'data') and sm.data.result.data:
+                            rows = []
+                            for row_data in sm.data.result.data:
+                                row_dict = {}
+                                for key, val in row_data.fields.items():
+                                    # Extract string or number value safely
+                                    row_dict[key] = val.string_value if val.string_value else val.number_value
+                                rows.append(row_dict)
+                            table_data = pd.DataFrame(rows)
+
+                # 5. DISPLAY RESULTS
+                if table_data is not None:
+                    st.subheader("Data Results")
+                    st.dataframe(table_data, use_container_width=True)
+
+                if final_text.strip():
+                    st.markdown(final_text)
+                    st.session_state.messages.append({"role": "assistant", "content": final_text})
+                elif table_data is None:
+                    st.warning("No summary or table was generated for this query.")
                     
             except Exception as e:
-                st.error(f"❌ Error during query: {e}")
+                st.error(f"Error: {e}")
