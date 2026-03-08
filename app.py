@@ -45,12 +45,12 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 # User input box
-if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
+if prompt := st.chat_input("E.g., Who scored the most tries in Round 1?"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Call the BigQuery Agent directly
+    # Call the BigQuery Agent
     with st.chat_message("assistant"):
         try:
             client = geminidataanalytics.DataChatServiceClient()
@@ -58,8 +58,9 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             MY_PROJECT = "nrl-2026-489302" 
             MY_LOCATION = "global"
             
-            MY_DATASET = "player_stats" # <-- Ensure this is still correct
-            MY_TABLE = "player_stats_test_2"     # <-- Ensure this is still correct
+            # --- Ensure these match your actual BigQuery location exactly ---
+            MY_DATASET = "player_stats" 
+            MY_TABLE = "player_stats_test_2"
             
             bq_ref = geminidataanalytics.BigQueryTableReference(
                 project_id=MY_PROJECT,
@@ -68,7 +69,7 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
             )
             
             my_context = geminidataanalytics.Context(
-                system_instruction="You are an expert NRL stats analyst. Query the provided BigQuery table to answer user questions about player statistics.",
+                system_instruction="You are an expert NRL stats analyst. Query the BigQuery table to answer user questions.",
                 datasource_references=geminidataanalytics.DatasourceReferences(
                     bq=geminidataanalytics.BigQueryTableReferences(
                         table_references=[bq_ref]
@@ -86,20 +87,24 @@ if prompt := st.chat_input("E.g., Who had the most linebreaks in Round 4?"):
                 ]
             )
             
-            # 4. Stream the response (Diagnostic Mode)
+            # 4. Stream the response and extract only the FINAL_RESPONSE
             stream = client.chat(request=request)
             
-            answer = "Diagnostic mode active. Check the raw output above."
+            answer = ""
             for reply in stream:
-                # Print the raw data to the screen so we can see its exact shape
-                st.info("🔍 RAW CHUNK RECEIVED:")
-                st.code(str(reply))
-                
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+                # Check if this chunk is a 'system_message'
+                if hasattr(reply, 'system_message'):
+                    sm = reply.system_message
+                    # We only want to show parts tagged as FINAL_RESPONSE
+                    if sm.text.text_type == geminidataanalytics.Text.TextType.FINAL_RESPONSE:
+                        for part in sm.text.parts:
+                            answer += part + "\n"
             
-            # Display the final answer
-            st.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+            if answer:
+                st.markdown(answer)
+                st.session_state.messages.append({"role": "assistant", "content": answer})
+            else:
+                st.warning("The agent processed the request but didn't return a final text response.")
             
         except Exception as e:
             st.error(f"Error: {e}")
